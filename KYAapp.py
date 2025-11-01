@@ -16,6 +16,24 @@ st.markdown("Your personal dashboard to track and predict the Air Quality Index 
 PLOTLY_COLORS = ['royalblue', 'darkorange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
 
 
+# --- Helper function for color conversion ---
+def get_rgb_string(color_name):
+    """Converts common Plotly color names to a comma-separated RGB string."""
+    color_map = {
+        'royalblue': '65,105,225',
+        'darkorange': '255,140,0',
+        'green': '0,128,0',
+        'red': '255,0,0',
+        'purple': '128,0,128',
+        'brown': '165,42,42',
+        'pink': '255,192,203',
+        'gray': '128,128,128',
+        'olive': '128,128,0',
+        'cyan': '0,255,255',
+    }
+    return color_map.get(color_name.lower(), '128,128,128')  # Default to gray RGB
+
+
 # --- Helper Functions ---
 def get_aqi_category(aqi):
     """Returns AQI category and color for st.metric."""
@@ -55,15 +73,31 @@ if os.path.exists(models_dir):
     model_files = [f for f in os.listdir(models_dir) if f.endswith(".pkl")]
     cities = sorted([f.replace("_prophet_model.pkl", "") for f in model_files])
 else:
-    st.error("Model directory not found. Please run the training script first.")
-    st.stop()
+    # Fallback/Dummy City list for demonstration if 'models' is missing
+    cities = ['CityA', 'CityB', 'CityC']
+    # st.error("Model directory not found. Please run the training script first.")
+    # st.stop()
 
 
 # --- Load Historical Data ---
 @st.cache_data
 def load_city_data(city):
     """Loads and caches historical data for a given city (real AQI)."""
-    df = pd.read_csv("combined_aqi_data.csv", parse_dates=["Date"], dayfirst=True)
+    try:
+        # Assuming 'combined_aqi_data.csv' exists
+        df = pd.read_csv("combined_aqi_data.csv", parse_dates=["Date"], dayfirst=True)
+    except FileNotFoundError:
+        # Create dummy data for demonstration if the file is missing
+        st.warning("Using dummy data: 'combined_aqi_data.csv' not found.")
+        start_date = pd.to_datetime('2023-01-01')
+        dates = pd.date_range(start=start_date, periods=300, freq='D')
+        aqi_values = np.clip(np.random.normal(loc=150, scale=50, size=300), 50, 350)
+        df = pd.DataFrame({
+            "Date": dates,
+            "AQI": aqi_values,
+            "City": np.random.choice(['CityA', 'CityB', 'CityC'], size=300)
+        })
+
     city_df = df[df["City"] == city][["Date", "AQI"]].copy()
     city_df = city_df.rename(columns={"Date": "ds", "AQI": "y"})
     city_df['ds'] = pd.to_datetime(city_df['ds'])
@@ -108,7 +142,8 @@ if view_mode == '📈 View Past Data':
             selected_month = 'All Months'
         else:
             year_df = first_city_df[first_city_df['ds'].dt.year == selected_year]
-            available_months = ['All Months'] + [calendar.month_name[m] for m in sorted(year_df['ds'].dt.month.unique())]
+            available_months = ['All Months'] + [calendar.month_name[m] for m in
+                                                 sorted(year_df['ds'].dt.month.unique())]
             selected_month = st.sidebar.selectbox("Select Month", available_months, key=f"month_{selected_year}")
 
 elif view_mode == '🔮 Forecast Future AQI':
@@ -118,7 +153,6 @@ elif view_mode == '🔮 Forecast Future AQI':
                   "Next 1 Year": 365, "Next 5 Years": 1825}
     period_option = st.sidebar.selectbox("Forecast Period", list(period_map.keys()))
     days = period_map[period_option]
-
 
 # --- Main Panel Logic ---
 if view_mode == "🏠 Home" or not selected_cities:
@@ -149,7 +183,6 @@ if view_mode == "🏠 Home" or not selected_cities:
     )
 
     st.stop()
-
 
 # --- View Past Data ---
 if view_mode == '📈 View Past Data':
@@ -198,7 +231,8 @@ if view_mode == '📈 View Past Data':
             ))
 
             if show_rolling_avg:
-                display_df['rolling_avg'] = display_df['y'].rolling(window=rolling_window, min_periods=1, center=True).mean()
+                display_df['rolling_avg'] = display_df['y'].rolling(window=rolling_window, min_periods=1,
+                                                                    center=True).mean()
                 fig.add_trace(go.Scatter(
                     x=display_df['ds'], y=display_df['rolling_avg'], mode='lines',
                     name=f"{city} ({rolling_window}-day Avg)",
@@ -256,43 +290,73 @@ elif view_mode == '🔮 Forecast Future AQI':
     fig = go.Figure()
     all_forecasts = []
 
+    # Anchor the forecast start date (Nov 2, 2025)
+    forecast_start_date_anchor = pd.to_datetime('2025-11-02')
+
     for i, city in enumerate(selected_cities):
         with st.spinner(f"Forecasting for {city}..."):
             model_path = f"models/{city}_prophet_model.pkl"
-            loaded = joblib.load(model_path)
 
-            # Support both new (model,floor,cap) and old (model only) formats
-            if isinstance(loaded, tuple):
-                model, floor, cap = loaded
-            else:
-                model = loaded
-                # defaults MUST match training if model was trained with floor/cap
+            # Use dummy model logic if the actual file is not found
+            if not os.path.exists(model_path):
+                st.warning(
+                    f"Dummy model used: Model file not found for {city}. Ensure you have models/{city}_prophet_model.pkl")
+
+                # Create a fake forecast for the requested period
+                future_dates = pd.date_range(start=forecast_start_date_anchor, periods=days, freq='D')
+                # Load historical data only to get a reasonable base AQI
+                city_df = load_city_data(city)
+                avg_aqi_base = city_df['y'].mean() if not city_df.empty else 150
+
+                forecast_future = pd.DataFrame({
+                    'ds': future_dates,
+                    'yhat': np.clip(np.random.normal(loc=avg_aqi_base, scale=20, size=days), 50, 350),
+                    'yhat_lower': np.clip(np.random.normal(loc=avg_aqi_base - 30, scale=10, size=days), 25, 300),
+                    'yhat_upper': np.clip(np.random.normal(loc=avg_aqi_base + 30, scale=10, size=days), 75, 400),
+                })
+                # Set dummy floor/cap for comparison logic safety
                 floor = np.log1p(25)
                 cap = np.log1p(500)
 
-            city_df = load_city_data(city)
-            last_date = city_df['ds'].max()
+            else:
+                loaded = joblib.load(model_path)
 
-            # Create future dataframe with required bounds for logistic growth
-            future_df = model.make_future_dataframe(periods=days)
-            future_df["floor"] = floor
-            future_df["cap"] = cap
+                # Support both new (model,floor,cap) and old (model only) formats
+                if isinstance(loaded, tuple):
+                    model, floor, cap = loaded
+                else:
+                    model = loaded
+                    # defaults MUST match training if model was trained with floor/cap
+                    floor = np.log1p(25)
+                    cap = np.log1p(500)
 
-            forecast = model.predict(future_df)
-            forecast['ds'] = pd.to_datetime(forecast['ds'])
+                city_df = load_city_data(city)
+                last_date = city_df['ds'].max()
 
-            # Convert from log space back to real AQI (clip then expm1)
-            forecast['yhat'] = np.expm1(np.clip(forecast['yhat'], floor, cap))
-            # also convert uncertainty bounds if present
-            if 'yhat_lower' in forecast.columns:
-                forecast['yhat_lower'] = np.expm1(np.clip(forecast['yhat_lower'], floor, cap))
-            if 'yhat_upper' in forecast.columns:
-                forecast['yhat_upper'] = np.expm1(np.clip(forecast['yhat_upper'], floor, cap))
+                # Calculate the total number of periods needed to reach the end of the forecast period
+                time_difference = forecast_start_date_anchor + pd.Timedelta(days=days) - last_date
+                total_periods_needed = time_difference.days + 1
 
-            # Select forecast window (only future days after last observed)
-            forecast_future = forecast[forecast['ds'] > last_date].copy()
-            # If user wanted a fixed anchor (like a specific pres_start) you'd filter differently.
-            forecast_future = forecast_future.sort_values('ds').reset_index(drop=True)
+                # Ensure we generate at least 'days' periods in total
+                total_periods_needed = max(days, total_periods_needed)
+
+                # Create future dataframe with required bounds for logistic growth
+                future_df = model.make_future_dataframe(periods=total_periods_needed)
+                future_df["floor"] = floor
+                future_df["cap"] = cap
+
+                forecast = model.predict(future_df)
+                forecast['ds'] = pd.to_datetime(forecast['ds'])
+
+                # Convert from log space back to real AQI (clip then expm1)
+                forecast['yhat'] = np.expm1(np.clip(forecast['yhat'], floor, cap))
+                if 'yhat_lower' in forecast.columns:
+                    forecast['yhat_lower'] = np.expm1(np.clip(forecast['yhat_lower'], floor, cap))
+                if 'yhat_upper' in forecast.columns:
+                    forecast['yhat_upper'] = np.expm1(np.clip(forecast['yhat_upper'], floor, cap))
+
+                # Select forecast window: starts from the anchor date and takes 'days' periods
+                forecast_future = forecast[forecast['ds'] >= forecast_start_date_anchor].head(days).copy()
 
         # Metrics & advisory
         if not forecast_future.empty:
@@ -309,6 +373,8 @@ elif view_mode == '🔮 Forecast Future AQI':
 
         # Plot predicted AQI (real scale)
         line_color = PLOTLY_COLORS[i % len(PLOTLY_COLORS)]
+
+        # Plot only the predicted line, ignoring the lower/upper bounds
         fig.add_trace(go.Scatter(
             x=forecast_future['ds'], y=forecast_future['yhat'], mode='lines',
             name=f"{city} (Predicted)", line=dict(color=line_color, dash='solid', width=3),
@@ -316,6 +382,30 @@ elif view_mode == '🔮 Forecast Future AQI':
             showlegend=True,
             hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Predicted: %{y:.2f}<extra></extra>'
         ))
+
+        # *** THE FOLLOWING CODE BLOCK HAS BEEN REMOVED TO ELIMINATE THE ERROR RANGE ***
+        #
+        # if 'yhat_lower' in forecast_future.columns:
+        #      rgb_string = get_rgb_string(line_color)
+        #      fill_rgba_color = f'rgba({rgb_string},0.1)'
+        #      fig.add_trace(go.Scatter(
+        #         x=forecast_future['ds'],
+        #         y=forecast_future['yhat_lower'],
+        #         line=dict(width=0),
+        #         mode='lines',
+        #         showlegend=False,
+        #         name=f'{city} lower'
+        #     ))
+        #      fig.add_trace(go.Scatter(
+        #         x=forecast_future['ds'],
+        #         y=forecast_future['yhat_upper'],
+        #         line=dict(width=0),
+        #         mode='lines',
+        #         fillcolor=fill_rgba_color,
+        #         fill='tonexty',
+        #         showlegend=False,
+        #         name=f'{city} upper'
+        #     ))
 
         # store forecast (converted to real AQI) for insights/downloads
         forecast_future['City'] = city
@@ -328,18 +418,18 @@ elif view_mode == '🔮 Forecast Future AQI':
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- MOVED INSIGHTS SECTION UP (converted to real AQI) ---
+    # --- INSIGHTS SECTION ---
     if all_forecasts:
         st.subheader("🔎 Forecast Insights")
         for city, forecast_df in zip(selected_cities, all_forecasts):
             if not forecast_df.empty:
                 hist_df = load_city_data(city)
 
-                # forecast_df already has yhat in real AQI
                 future_avg = forecast_df['yhat'].mean()
                 forecast_start_date = forecast_df['ds'].min()
                 forecast_end_date = forecast_df['ds'].max()
 
+                # Comparison period is the same length, one year prior
                 comparison_start_date = forecast_start_date - pd.DateOffset(years=1)
                 comparison_end_date = forecast_end_date - pd.DateOffset(years=1)
 
@@ -347,17 +437,18 @@ elif view_mode == '🔮 Forecast Future AQI':
                 comparison_period_df = hist_df[
                     (hist_df['ds'] >= comparison_start_date) &
                     (hist_df['ds'] <= comparison_end_date)
-                ]
+                    ]
 
                 if not comparison_period_df.empty:
                     historical_comparison_avg = comparison_period_df['y'].mean()
-                    change = ((future_avg - historical_comparison_avg) / historical_comparison_avg) * 100 if historical_comparison_avg else 0
+                    change = ((
+                                          future_avg - historical_comparison_avg) / historical_comparison_avg) * 100 if historical_comparison_avg else 0
                     st.markdown(
                         f"**{city}**: The forecasted AQI ({future_avg:.2f}) is *{change:+.1f}%* compared to the same period last year ({historical_comparison_avg:.2f}).")
                     if change > 5:
-                        st.markdown(f"↳ 📈 Air quality is expected to worsen for {city}.")
+                        st.markdown(f"↳ 📈 Air quality is expected to **worsen** for {city}.")
                     elif change < -5:
-                        st.markdown(f"↳ ✅ Air quality is expected to improve for {city}.")
+                        st.markdown(f"↳ ✅ Air quality is expected to **improve** for {city}.")
                     else:
                         st.markdown(f"↳ ⚖ No significant change in air quality expected for {city}.")
                 else:
@@ -382,6 +473,7 @@ elif view_mode == '🔮 Forecast Future AQI':
         with st.expander("View Detailed Forecast Data"):
             st.dataframe(
                 combined_forecast[['City', 'ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(
-                    columns={'ds': 'Date', 'yhat': 'Predicted AQI', 'yhat_lower': 'Lower Bound', 'yhat_upper': 'Upper Bound'}
+                    columns={'ds': 'Date', 'yhat': 'Predicted AQI', 'yhat_lower': 'Lower Bound',
+                             'yhat_upper': 'Upper Bound'}
                 )
             )
